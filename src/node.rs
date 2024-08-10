@@ -1,6 +1,6 @@
 use std::{borrow::{Borrow, BorrowMut}, cell::{Ref, RefCell, RefMut}, sync::{Arc, Weak}};
 
-use crate::{bucket::Bucket, config::PAGE_SIZE, db, page::{BranchPageElement, LeafPageElement, Page, PageFlag, PgId, BRANCH_ELEMENT_SIZE, LEAF_ELEMENT_SIZE, MIN_KEY_PERPAGE, PAGE_HEADER_SIZE}, tx::Tx, MAX_FILL_PERCENT, MIN_FILL_PERCENT};
+use crate::{config::PAGE_SIZE, db, page::{BranchPageElement, LeafPageElement, Page, PageFlag, PgId, BRANCH_ELEMENT_SIZE, LEAF_ELEMENT_SIZE, MIN_KEY_PERPAGE, PAGE_HEADER_SIZE}, tx::Tx, MAX_FILL_PERCENT, MIN_FILL_PERCENT};
 
 use crate::error::Result;
 #[derive(Clone)]
@@ -99,7 +99,7 @@ impl Node {
 
     pub(crate) fn child_at(
         &self,
-        bucket: &mut Bucket,
+        tx: &Tx,
         index: usize,
         parent: Option<WeakNode>,
     ) -> Node {
@@ -107,7 +107,7 @@ impl Node {
             panic!("invalid childAt{} on a leaf node", index);
         }
         let pgid = self.node().inodes[index].pgid;
-        bucket.node(pgid, parent)
+        tx.node(pgid, parent)
     }
 
 
@@ -251,7 +251,7 @@ impl Node {
         self.node().inodes.len()
     }
 
-    fn next_sibling(&self, bucket: &mut Bucket) -> Option<Node> {
+    fn next_sibling(&self, tx: &Tx) -> Option<Node> {
         match self.parent() {
             None => None,
             Some(mut p) => {
@@ -259,12 +259,12 @@ impl Node {
                 if index as isize > self.num_children() as isize - 1 {
                     return None;
                 }
-                Some(p.child_at(bucket, index + 1, Some(WeakNode(Arc::downgrade(&p.0)))))
+                Some(p.child_at(tx, index + 1, Some(WeakNode(Arc::downgrade(&p.0)))))
             }
         }
     }
 
-    fn prev_sibling(&self,bucket: &mut Bucket) -> Option<Node> {
+    fn prev_sibling(&self,tx: &Tx) -> Option<Node> {
         match self.parent(){
             None => None,
             Some(p) => {
@@ -272,19 +272,18 @@ impl Node {
                 if index == 0 {
                     return None;
                 }
-                Some(p.child_at(bucket, index - 1,Some(WeakNode(Arc::downgrade(&p.0)))))
+                Some(p.child_at(tx, index - 1,Some(WeakNode(Arc::downgrade(&p.0)))))
             }
         }
     }
 
-    pub(crate) fn free(&mut self, bucket: &Bucket) {
+    pub(crate) fn free(&mut self, tx: &Tx) {
         if self.node().pgid != 0 {
-            let tx = bucket.tx().unwrap();
             let db = tx.db().unwrap();
             db.0.freelist
                 .try_write()
                 .unwrap()
-                .free(bucket.tx().unwrap().0.meta.borrow().txid, unsafe {
+                .free(tx.id(), unsafe {
                     &*db.0.page(self.node().pgid)
                 });
             self.node_mut().pgid = 0;
@@ -303,8 +302,8 @@ impl Node {
         }
     }
 
-    pub(crate) fn rebalance(&mut self, page_size: usize, b: *const Bucket) -> Result<()> {
-        let bucket = unsafe { &mut *(b as *mut Bucket) };
+    pub(crate) fn rebalance(&mut self, page_size: usize,tx: &Tx) -> Result<()> {
+
         if !self.node_mut().unbalanced {
             return Ok(());
         }
@@ -320,7 +319,7 @@ impl Node {
                 // 将root节点的叶子节点上移
                 // 创建一个新的子节点，以当前节点作为root节点
                 let pgid = self.node().inodes[0].pgid;
-                let mut child = bucket.node(pgid, Some(WeakNode(Arc::downgrade(&self.0))));
+                let mut child = tx.node(pgid, Some(WeakNode(Arc::downgrade(&self.0))));
 
                 let mut node_mut = self.node_mut();
                 node_mut.is_leaf = child.node().is_leaf;
@@ -328,8 +327,8 @@ impl Node {
                 node_mut.children = child.node_mut().children.drain(..).collect();
                 //删除老得叶子节点
                 child.node_mut().parent = None;
-                bucket.nodes.borrow_mut().remove(&child.node().pgid);
-                child.free(bucket);
+                tx.0.nodes.borrow_mut().remove(&child.node().pgid);
+                child.free(tx);
             }
             return Ok(());
         }
@@ -343,25 +342,25 @@ impl Node {
             }
             p.remove_child(self.clone());
             let pgid = self.node().pgid;
-            bucket.nodes.borrow_mut().remove(&pgid);
-            self.free(bucket); //释放当前节点对应的page
-            p.rebalance(page_size, bucket)?;
+            tx.0.nodes.borrow_mut().remove(&pgid);
+            self.free(&tx); //释放当前节点对应的page
+            p.rebalance(page_size, &tx)?;
             return Ok(());
         }
         //下面的情况是当前节点有数据
         let use_next_sibing = p.child_index(self.node().key.as_ref().unwrap()) == 0; //找到需要rebalance的节点的位置
         let mut target = if use_next_sibing {
             //当前节点是最左边的节点
-            self.next_sibling(bucket).unwrap()
+            self.next_sibling(tx).unwrap()
         } else {
             //左边的兄弟节点
-            self.prev_sibling(bucket).unwrap()
+            self.prev_sibling(tx).unwrap()
         };
         // 如果当前节点和target节点都太小了，则合并他们
         if use_next_sibing {
             for inode in target.node().inodes.iter() {
                 //如果目标节点是当前节点的右边的兄弟节点，则将target节点合并到当前节点，
-                if let Some(child) = bucket.nodes.borrow_mut().get_mut(&inode.pgid) {
+                if let Some(child) = tx.0.nodes.borrow_mut().get_mut(&inode.pgid) {
                     child.parent().unwrap().remove_child(child.clone());
                     child.node_mut().parent = Some(WeakNode(Arc::downgrade(&self.0))); //重新计算其父节点为当前节点
                                                                             //将child加入当前node的子节点中
@@ -381,13 +380,13 @@ impl Node {
                 .append(&mut target.node_mut().inodes.drain(..).collect::<Vec<INode>>());
             p.del(target.node().key.as_ref().unwrap()); //将目标节点的key从父节点中移除（target节点和n的父节点是同一个）
             p.remove_child(target.clone()); //从目标节点的父节点的叶子节点中移除目标节点
-            bucket.nodes.borrow_mut().remove(&target.node().pgid); //删除当前bucket的节点缓存中的目标节点
-            target.free(bucket); //释放target节点占有的页面
+            tx.0.nodes.borrow_mut().remove(&target.node().pgid); //删除当前bucket的节点缓存中的目标节点
+            target.free(&tx); //释放target节点占有的页面
         } else {
             {
                 //如果target节点是当前节点的左边的兄弟节点，则将当前节点合并到左边的兄弟节点
                 for inode in self.node().inodes.iter() {
-                    if let Some(child) = bucket.nodes.borrow_mut().get_mut(&inode.pgid) {
+                    if let Some(child) = tx.0.nodes.borrow_mut().get_mut(&inode.pgid) {
                         child.parent().unwrap().remove_child(child.clone());
                         child.node_mut().parent = Some(WeakNode(Arc::downgrade(&target.0)));
                         child
@@ -406,10 +405,10 @@ impl Node {
                 .append(&mut self.node_mut().inodes.drain(..).collect::<Vec<INode>>()); // inodes按照key排序，添加到目标节点中仍然是有序的
             p.del(self.node().key.as_ref().unwrap());
             p.remove_child(self.clone());
-            bucket.nodes.borrow_mut().remove(&self.node().pgid);
-            self.free(bucket);
+            tx.0.nodes.borrow_mut().remove(&self.node().pgid);
+            self.free(tx);
         }
-        self.parent().unwrap().rebalance(page_size, b)
+        self.parent().unwrap().rebalance(page_size, tx)
     }
 
 
@@ -472,7 +471,7 @@ impl Node {
         return true;
     }
 
-    pub(crate) fn spill(&self, atx: Tx, bucket: &Bucket) -> Result<Node> {
+    pub(crate) fn spill(&self, atx: Tx) -> Result<Node> {
         if self.node().spilled {
             return Ok(self.clone());
         }
@@ -483,7 +482,7 @@ impl Node {
 
         let children = self.node().children.clone();
         for child in children.iter() {
-            child.spill(atx.clone(), bucket)?;
+            child.spill(atx.clone())?;
         }
 
         self.node_mut().children.clear();
@@ -491,7 +490,7 @@ impl Node {
         let mut tx = atx.clone();
         let db = tx.db().unwrap();
 
-        let mut nodes = self.split(PAGE_SIZE, bucket.fill_percent);
+        let mut nodes = self.split(PAGE_SIZE, tx.0.fill_percent);
 
         // 这里设置父节点信息
         let parent_node = 
@@ -556,7 +555,7 @@ impl Node {
 
         if let Some(mut p) = parent_node {
             p.node_mut().children.clear();
-            return p.spill(atx, bucket);
+            return p.spill(atx);
         }
 
         if let None = parent_node {

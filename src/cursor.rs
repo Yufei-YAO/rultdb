@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use crate::{bucket::{Bucket, PageNode}, node::{Node, WeakNode}, page::{Page, PageFlag, PgId}};
+use crate::{ node::{Node, WeakNode}, page::{Page, PageFlag, PgId}, tx::{PageNode, Tx, WeakTx}};
 use crate::error::Result;
 
 
 
 
-pub(crate) struct Cursor<'a> {
-    pub(crate) bucket: &'a mut Bucket,
+pub(crate) struct Cursor{
+    //pub(crate) bucket: &'a mut Bucket,
+    pub(crate) tx: Tx,
     stack: Vec<ElemRef>,
 }
 
@@ -79,10 +80,10 @@ impl ElemRef {
     }
 }
 
-impl<'a> Cursor<'a> {
-    pub(crate) fn new(bucket: &'a mut Bucket) -> Cursor<'a> {
+impl Cursor {
+    pub(crate) fn new(tx: Tx) -> Cursor {
         Self {
-            bucket: bucket,
+            tx: tx,
             stack: Vec::new(),
         }
     }
@@ -108,7 +109,7 @@ impl<'a> Cursor<'a> {
                         .value
                 }
             };
-            let page_node = self.bucket.page_node(pgid)?;
+            let page_node = self.tx.page_node(pgid)?;
             self.stack.push(ElemRef {
                 page_node: page_node,
                 index: 0,
@@ -118,7 +119,7 @@ impl<'a> Cursor<'a> {
     }
 
 
-    fn next(&mut self) -> Result<Item<'a>> {
+    fn next<'a>(&mut self) -> Result<Item<'a>> {
         loop {
             let mut index: usize = 0;
             let mut i: i32 = -1;
@@ -143,7 +144,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    pub(crate) fn seek(&mut self, key: &[u8]) -> Result<Item<'a>> {
+    pub(crate) fn seek<'a>(&mut self, key: &[u8]) -> Result<Item<'a>> {
         let mut item = self.seek_item(key)?;
         let ref_elem = self.stack.last().ok_or("stack empty")?;
         if ref_elem.index >= ref_elem.count() {
@@ -156,9 +157,9 @@ impl<'a> Cursor<'a> {
         Ok(item)
     }
 
-    pub(crate) fn seek_item(&mut self, key: &[u8]) -> Result<Item<'a>> {
+    pub(crate) fn seek_item<'a>(&mut self, key: &[u8]) -> Result<Item<'a>> {
         self.stack.clear();
-        self.search(key, self.bucket.pg_id)?;
+        self.search(key, self.tx.root_id())?;
         let ref_elem = self.stack.last().ok_or("stack empty")?;
         if ref_elem.index >= ref_elem.count() {
             return Ok(Item::null());
@@ -166,7 +167,7 @@ impl<'a> Cursor<'a> {
         self.key_value()
     }
 
-    fn key_value(&self) -> Result<Item<'a>> {
+    fn key_value<'a>(&self) -> Result<Item<'a>> {
         let ref_elem = self.stack.last().ok_or("stack empty")?;
         unsafe {
             match &ref_elem.page_node {
@@ -191,7 +192,7 @@ impl<'a> Cursor<'a> {
 
     //查询
     fn search(&mut self, key: &[u8], id: PgId) -> Result<()> {
-        let page_node = self.bucket.page_node(id)?;
+        let page_node = self.tx.page_node(id)?;
         let elem_ref = ElemRef {
             page_node: page_node,
             index: 0,
@@ -276,11 +277,11 @@ impl<'a> Cursor<'a> {
         let mut elem = self.stack.first().unwrap();
         let mut n = match &elem.page_node {
             PageNode::Node(n) => n.clone(),
-            PageNode::Page(p) => self.bucket.node(elem.get_page(p).id, None),
+            PageNode::Page(p) => self.tx.node(elem.get_page(p).id, None),
         };
 
         for e in self.stack[..self.stack.len() - 1].iter() {
-            let child = n.child_at(self.bucket, e.index, Some(WeakNode(Arc::downgrade(&n.0))));
+            let child = n.child_at(&self.tx, e.index, Some(WeakNode(Arc::downgrade(&n.0))));
             n = child;
         }
         assert!(n.node().is_leaf, "expected leaf node");
