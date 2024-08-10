@@ -2,7 +2,6 @@ pub mod error;
 pub mod page;
 pub mod tx;
 pub mod freelist;
-pub mod bucket;
 pub mod node;
 pub mod cursor;
 pub mod db;

@@ -1,6 +1,6 @@
 use std::{borrow::Borrow, cell::{RefCell, RefMut}, collections::HashMap, io::WriterPanicked, marker::PhantomData, sync::{Arc, Weak}};
 
-use crate::{bucket::Bucket, config::PAGE_SIZE, db::{WeakDB, DB}, page::{Meta, OwnedPage, Page, PgId}};
+use crate::{config::PAGE_SIZE, cursor::Cursor, db::{WeakDB, DB}, error::Error, node::{Node, NodeInner, WeakNode}, page::{Meta, OwnedPage, Page, PgId}, DEFAULT_FILL_PERCENT, MAX_KEY_SIZE, MAX_VALUE_SIZE};
 
 
 use crate::error::Result;
@@ -25,9 +25,12 @@ pub struct WeakTx(pub(crate) Weak<TxInner>);
 pub struct TxInner {
     pub(crate) writable: bool,
     pub weak_db: WeakDB,
-    pub(crate) root: RefCell<Bucket>,
+    //pub(crate) root: RefCell<Bucket>,
     pub(crate) meta: RefCell<Meta>,
     pub(crate) pages: RefCell<HashMap<PgId, OwnedPage>>,
+    pub(crate) nodes: RefCell<HashMap<PgId, Node>>,
+    pub(crate) root_node: RefCell<Option<Node>>,
+    pub(crate) fill_percent: f64,
 }
 
 
@@ -53,11 +56,9 @@ impl Tx {
         }
         let db = self.db().unwrap();
 
-        self.0.root
-            .borrow_mut()
-            .rebalance(PAGE_SIZE as usize)?;
-        if let Err(e) = self.0.root.borrow_mut().spill(self.clone()) {
-            self.clone().rollback()?;
+        self.rebalance(PAGE_SIZE as usize)?;
+        if let Err(e) = self.spill() {
+            self.rollback()?;
             return Err(e);
         }
         //回收旧的freelist列表
@@ -82,8 +83,9 @@ impl Tx {
 
         self.0.meta.borrow_mut().freelist = page.id;
         self.0.pages.borrow_mut().insert(page.id, p);
-        let roo = self.bucket().unwrap().pg_id;
-        self.0.meta.borrow_mut().root = roo;
+        //let roo = self.0.meta.borrow().root;
+        // may be already update;
+        //self.0.meta.borrow_mut().root = roo;
         let check_sum = self.0.meta.borrow().compute_checksum();
         self.0.meta.borrow_mut().checksum = check_sum;
         //write dirty page
@@ -114,23 +116,21 @@ impl Tx {
         Ok(())
     }
 
-    pub fn bucket<'a,'b: 'a>(&'b mut self) -> Result<RefMut<'a,Bucket>> {
-        Ok(self.0.root.borrow_mut())
-    }
 
 
     pub fn new(writable: bool, weak_db: WeakDB, meta: Meta) -> Self {
-        let root_id = meta.root;
         let tx = Arc::new(
             TxInner{
                 writable,
                 weak_db ,
-                root: RefCell::new(Bucket::default()),
                 meta: RefCell::new(meta),
                 pages: Default::default(),
+                nodes: RefCell::new(HashMap::new()),
+                root_node: Default::default(),
+                fill_percent: DEFAULT_FILL_PERCENT,
+                
             }
         );
-        *tx.root.borrow_mut() = Bucket::new(root_id, WeakTx(Arc::downgrade(&tx)));
         Tx(tx)
     }
 
@@ -172,5 +172,119 @@ impl Tx {
         let ow = OwnedPage::from_vec(buf);
         self.db().unwrap().0.sync()?;
         Ok(())
+    }
+}
+
+
+impl Tx {
+    pub fn root_id(&self) -> PgId {
+        self.0.meta.borrow().root
+    }
+    fn cursor(&mut self ) -> Cursor{
+        Cursor::new(self.clone())
+    }
+
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        if key.len() == 0 {
+            return Err(Error::ErrKeyRequired);
+        } else if key.len() > MAX_KEY_SIZE {
+            return Err(Error::ErrKeyTooLarge);
+        } else if value.len() > MAX_VALUE_SIZE {
+            return Err(Error::ErrValueTooLarge);
+        }
+
+        let mut c = self.cursor();
+        let item = c.seek(key)?;
+
+        c.node()?.put(key, key, value, 0);
+        Ok(())
+    }
+
+
+    pub fn get(&mut self, key: &[u8]) -> Option<&[u8]> {
+        let mut c = self.cursor();
+        let item  = c.seek(key).unwrap();
+        if item.0.is_none() {
+            return None;
+        }
+        if item.0.unwrap() ==  key {
+            return item.1
+        }else {
+            return None;
+        }
+
+    }
+    pub fn delete(&mut self, key: &[u8]) -> Result<()> {
+        let mut c = self.cursor();
+        c.seek(key)?;
+        c.node()?.del(key);
+        Ok(())
+    }
+    pub(crate) fn page_node(&self, id: PgId) -> Result<PageNode> {
+        if let Some(node) = self.0.nodes.borrow().get(&id) {
+            return Ok(PageNode::Node(node.clone()));
+        }
+        let page = self.db().unwrap().0.page(id);
+        Ok(PageNode::Page(page))
+    }
+
+    pub(crate) fn node(&self, pgid: PgId, parent: Option<WeakNode>) -> Node {
+        if let Some(node) = self.0.nodes.borrow().get(&pgid) {
+            return node.clone();
+        }
+
+        let mut n = if let Some(p) = parent {
+            let n = NodeInner::new().parent(p.clone()).build();
+            let parent_node =  p.upgrade().unwrap();
+            parent_node.node_mut().children.push(n.clone());
+            n
+        } else {
+            let n = NodeInner::new().build();
+            self.0.root_node.replace(Some(n.clone()));
+            n
+        };
+
+        let page = {
+            let p = self.db().unwrap().0.page(pgid);
+            unsafe { &*p }
+        };
+        n.read(page);
+        self.0.nodes.borrow_mut().insert(pgid, n.clone());
+        n
+    }
+
+    pub(crate) fn rebalance(&mut self, page_size: usize) -> Result<()> {
+        let nodes = self.0.nodes.clone();
+        for n in nodes.borrow_mut().values_mut() {
+            n.rebalance(page_size,self)?;
+        }
+        Ok(())
+    }
+
+
+    pub(crate) fn spill(&mut self) -> Result<()> {
+        let mut x = self.0.root_node.borrow_mut();
+        if x.is_none() {
+            return Ok(())
+        }
+        let n = x.as_ref().unwrap();
+        let mut root = n.clone();
+        let root_node = root.spill(self.clone())?;
+        self.0.meta.borrow_mut().root = root_node.node().pgid;
+        (x).replace(root_node);
+        Ok(())
+    } 
+}
+
+
+#[derive(Clone)]
+pub(crate) enum PageNode {
+    Page(*const Page),
+    Node(Node),
+}
+
+impl From<Node> for PageNode {
+    fn from(n: Node) -> Self {
+        PageNode::Node(n)
     }
 }

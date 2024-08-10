@@ -325,31 +325,25 @@ mod tests {
     fn test_tx_delete() {
         let mut db = DBInner::open("./test2.db", DEFAULT_OPTIONS).unwrap();
         let mut tx1 = db.begin_rwtx();
-        tx1.bucket().unwrap().put(b"001", b"123");
-        tx1.bucket().unwrap().put(b"005", b"ccc");
+        tx1.put(b"001", b"123");
+        tx1.put(b"005", b"ccc");
         tx1.commit();
         let mut tx2 = db.begin_rwtx();
-        let mut b = tx2.bucket().unwrap();
-        b.put(b"002", b"bbb");
-        b.put(b"003", b"ccc");
-        b.put(b"004", b"ddd");
-        drop(b);
+        tx2.put(b"002", b"bbb");
+        tx2.put(b"003", b"ccc");
+        tx2.put(b"004", b"ddd");
         tx2.commit();
 
         let mut tx3 = db.begin_rwtx();
-        let mut b = tx3.bucket().unwrap();
-        b.delete(b"001");
-        assert_eq!(b.get(b"001"),None);
-        drop(b);
+        tx3.delete(b"001");
+        assert_eq!(tx3.get(b"001"),None);
         tx3.commit();
 
 
         let mut tx4 = db.begin_tx();
-        let mut b = tx4.bucket().unwrap();
-        assert_eq!(b.get(b"002").unwrap(),b"bbb");
-        assert_eq!(b.get(b"004").unwrap(),b"ddd");
-        assert_eq!(b.get(b"001"),None);
-        drop(b);
+        assert_eq!(tx4.get(b"002").unwrap(),b"bbb");
+        assert_eq!(tx4.get(b"004").unwrap(),b"ddd");
+        assert_eq!(tx4.get(b"001"),None);
         tx4.commit();
     }
     #[test]
@@ -357,17 +351,15 @@ mod tests {
         let mut db = DBInner::open("./test2.db", DEFAULT_OPTIONS).unwrap();
         dbg!(db.0.state.try_read().unwrap().meta().root);
         let mut tx1 = db.begin_rwtx();
-        tx1.bucket().unwrap().put(b"001", b"aaa");
-        tx1.bucket().unwrap().put(b"005", b"ccc");
+        tx1.put(b"001", b"aaa");
+        tx1.put(b"005", b"ccc");
         tx1.commit().unwrap();
 
         dbg!(db.0.state.try_read().unwrap().meta().root);
         dbg!(db.0.state.try_read().unwrap().meta().txid);
         let mut tx4 = db.begin_tx();
-        let mut b = tx4.bucket().unwrap();
-        assert_eq!(b.get(b"001").unwrap(),b"aaa");
-        assert_eq!(b.get(b"008"),None);
-        drop(b);
+        assert_eq!(tx4.get(b"001").unwrap(),b"aaa");
+        assert_eq!(tx4.get(b"008"),None);
         tx4.commit();
     }
     //#[test]
