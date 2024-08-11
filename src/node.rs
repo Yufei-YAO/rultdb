@@ -1,4 +1,4 @@
-use std::{borrow::{Borrow, BorrowMut}, cell::{Ref, RefCell, RefMut}, sync::{Arc, Weak}};
+use std::{borrow::{Borrow, BorrowMut}, cell::{Ref, RefCell, RefMut}, collections::HashSet, sync::{Arc, Weak}};
 
 use crate::{config::PAGE_SIZE, db, page::{BranchPageElement, LeafPageElement, Page, PageFlag, PgId, BRANCH_ELEMENT_SIZE, LEAF_ELEMENT_SIZE, MIN_KEY_PERPAGE, PAGE_HEADER_SIZE}, tx::Tx, MAX_FILL_PERCENT, MIN_FILL_PERCENT};
 
@@ -139,7 +139,7 @@ impl Node {
         }
     }
 
-    pub(crate) fn del(&mut self, key: &[u8]) {
+    pub(crate) fn del(&self, key: &[u8]) {
         let (exact, index) = {
             match self
                 .node()
@@ -150,7 +150,7 @@ impl Node {
                 Err(e) => (false, e),
             }
         };
-        dbg!(exact);
+        //dbg!(exact);
         if !exact {
             return;
         }
@@ -485,6 +485,15 @@ impl Node {
             child.spill(atx.clone())?;
         }
 
+        if !self.node().is_leaf {
+            let mut hs: HashSet<_> = Default::default();
+            for i in &self.node().inodes {
+                //dbg!(&i.pgid);
+                assert!(!hs.contains(&i.pgid));
+                hs.insert(i.pgid);
+            }
+
+        }
         self.node_mut().children.clear();
 
         let mut tx = atx.clone();
@@ -501,10 +510,12 @@ impl Node {
                 None
             }
         } else {
-            if let Some(parent) = &self.node().parent {
+            let no = self.node().parent.clone();
+            if let Some(parent) = no{
                 let p = parent.upgrade().unwrap();
                 for n in nodes.iter_mut() {
-                    n.node_mut().parent = Some(parent.clone());
+                    let mut k = n.node_mut();
+                    k.parent = Some(parent.clone());
                 }
                 p.node_mut().children.extend_from_slice(&nodes[1..]);
                 Some(p)
@@ -517,9 +528,9 @@ impl Node {
                 Some(parent)
             }
         };
-
-
+        let len = nodes.len();
         for n in nodes.iter_mut() {
+            let prekey = n.node().key.clone();
             if n.node().pgid > 0 {
                 db.0.freelist
                     .try_write()
@@ -532,6 +543,8 @@ impl Node {
             let page = p.to_page_mut();
             let new_id = page.id;
             n.node_mut().pgid = page.id;
+            let first_key = n.node().inodes.first().unwrap().key.clone();
+            n.node_mut().key = Some(first_key);
             n.write(page);
             tx.0.pages.borrow_mut().insert(page.id, p);
             n.node_mut().spilled = true;
@@ -539,6 +552,9 @@ impl Node {
             if let Some(parent) = &parent_node {
                 // let mut parent_node = parent.upgrade().map(Node).unwrap();
                 if let Some(key) = &n.node().key {
+                    if let Some(prekey) = prekey {
+                        parent.del(&prekey);
+                    }
                     let pgid = n.node().pgid;
                     parent.put(key, key, &vec![], pgid);
                 } else {

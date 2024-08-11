@@ -207,6 +207,8 @@ impl Tx {
         if item.0.is_none() {
             return None;
         }
+        //return item.0; 
+
         if item.0.unwrap() ==  key {
             return item.1
         }else {
@@ -276,7 +278,10 @@ impl Tx {
     } 
 }
 
-
+unsafe impl Send for Tx {
+}
+unsafe impl Sync for Tx {
+}
 #[derive(Clone)]
 pub(crate) enum PageNode {
     Page(*const Page),

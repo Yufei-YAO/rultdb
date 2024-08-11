@@ -5,7 +5,7 @@ use crate::error::Result;
 
 
 
-#[derive(Default)]
+#[derive(Default,Debug)]
 pub struct FreeList {
     pub(crate) ids: Vec<PgId>,
     pub(crate) pending: HashMap<TxId, Vec<PgId>>,
@@ -40,6 +40,9 @@ impl FreeList {
     }
 
     pub fn free(&mut self, txid: TxId, p: &Page) {
+        //if p.id == 4 {
+            //dbg!(&*self);
+        //}
         assert!(p.id > 1, "cannot free page {}",p.id);
         let ids = self.pending.entry(txid).or_insert(Vec::new());
         for id in p.id..=p.id + p.overflow as PgId {
@@ -48,9 +51,28 @@ impl FreeList {
     }
 
     pub fn allocate(&mut self, n: usize) -> PgId {
+        //dbg!(&*self);
         if self.ids.len() == 0 {
             return 0;
         }
+//        let mut initial: PgId = 0;
+        //let mut previd: PgId = 0;
+        //let mut end_alloc = 0;
+        //for (i, id) in self.ids.iter().enumerate() {
+            //assert!(*id > 1, "invalid free page {}",id);
+
+            //if previd == 0 || id-previd != 1 {
+                //initial = *id;
+            //}
+            //if (*id - initial) +1 == n as PgId {
+                //end_alloc = i;
+                //break;
+            //}
+        //}
+        //if end_alloc == 0 {
+            ////return 0;
+        //}
+        //dbg!(initial);
         let mut initial: PgId = 0;
         let mut previd: PgId = 0;
         let item = self.ids.iter().enumerate().position(|(_i, _id)| {
@@ -58,18 +80,19 @@ impl FreeList {
             assert!(id > 1, "invalid free page {}",id);
 
             if previd == 0 || id - previd != 1 {
-                initial = id;
+              initial = id;
             }
             if (id - initial) + 1 == n as PgId {
-                return true;
+              return true;
             }
             previd = id;
             false
         });
         return match item {
             Some(index) => {
-                self.ids.drain(index - (n - 1)..index + 1);
-                initial
+              //dbg!(initial);
+              self.ids.drain(index - (n - 1)..index + 1);
+              initial
             }
             None => 0,
         };

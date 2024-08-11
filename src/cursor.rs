@@ -1,6 +1,8 @@
-use std::sync::Arc;
+use std::{borrow::Borrow, sync::Arc};
 
-use crate::{ node::{Node, WeakNode}, page::{Page, PageFlag, PgId}, tx::{PageNode, Tx, WeakTx}};
+use bitflags::Flags;
+
+use crate::{ db, node::{Node, WeakNode}, page::{Page, PageFlag, PgId}, tx::{PageNode, Tx, WeakTx}};
 use crate::error::Result;
 
 
@@ -103,6 +105,7 @@ impl Cursor {
                         .pgid
                 }
                 PageNode::Page(p) => {
+                    //dbg!(ref_elem.get_page(p).count,ref_elem.index);
                     ref_elem
                         .get_page(p)
                         .branch_page_element(ref_elem.index)
@@ -126,7 +129,7 @@ impl Cursor {
             for _i in (0..self.stack.len() - 1).rev() {
                 //取上一页数据
                 let elem = self.stack.get_mut(_i).ok_or("get elem fail")?;
-                if elem.index < elem.count() {
+                if elem.index + 1 < elem.count() {
                     elem.index += 1;
                     i = _i as i32;
                     break;
@@ -147,9 +150,13 @@ impl Cursor {
     pub(crate) fn seek<'a>(&mut self, key: &[u8]) -> Result<Item<'a>> {
         let mut item = self.seek_item(key)?;
         let ref_elem = self.stack.last().ok_or("stack empty")?;
+        let idx = ref_elem.index;
         if ref_elem.index >= ref_elem.count() {
             item = self.next()?;
         }
+
+        //dbg!(idx);
+        //dbg!(key);
 
         if item.key().is_none() {
             return Ok(Item::null());
@@ -206,7 +213,14 @@ impl Cursor {
         //
         match &elem_ref.page_node {
             PageNode::Node(n) => self.search_node(key, n)?,
-            PageNode::Page(p) => self.search_page(key, elem_ref.get_page(p))?,
+            PageNode::Page(p) => {
+                //if !self.tx.0.writable {
+                    //let len = elem_ref.get_page(p).branch_page_elements().len();
+                    //dbg!(elem_ref.get_page(p).branch_page_element(0).key());
+                    //dbg!(elem_ref.get_page(p).branch_page_element(len-1).key());
+                //}
+                self.search_page(key, elem_ref.get_page(p))?
+            },
         }
         Ok(())
     }
@@ -228,6 +242,10 @@ impl Cursor {
             }
             PageNode::Page(p) => {
                 let inodes = e.get_page(p).leaf_page_elements();
+                //if !self.tx.0.writable {
+                    //dbg!(&inodes[0..20]);
+
+                //}
                 let index = match inodes.binary_search_by(|inode| inode.key().cmp(key)) {
                     Ok(v) => (v),
                     Err(e) => (e),
@@ -247,6 +265,14 @@ impl Cursor {
         if !exact && index > 0 {
             index -= 1;
         }
+        //if !self.tx.0.writable && index < inodes.len() {
+            //dbg!(inodes[index].key());
+            //for i in 0..inodes.len() {
+                //dbg!(inodes[i].key());
+                //dbg!(inodes[i].value);
+            //}
+        //}
+        //dbg!(&inodes[index].key());
         self.stack.last_mut().ok_or("stack empty")?.index = index;
         self.search(key, inodes[index].value)?;
         Ok(())

@@ -138,7 +138,6 @@ impl DB {
             self.0.state.raw().lock_shared();
         }
         let mut meta = self.0.state.try_read().unwrap().borrow().meta();
-        dbg!(meta.txid);
         let mut tx = Tx::new(false, WeakDB(Arc::downgrade(&self.0)), meta);
         self.0.txs.try_write().unwrap().push(tx.clone());
         tx
@@ -219,7 +218,6 @@ impl DBInner {
         p.flags = PageFlag::LeafPage;
         p.count = 0;
 
-        dbg!(self.file.try_read().unwrap().metadata().unwrap().len());
         self.write_at(&buf, 0)?;
         self.sync()?;
 
@@ -266,7 +264,6 @@ impl DBInner {
         p.overflow = (count - 1) as u32;
 
         p.id = self.freelist.try_write().unwrap().allocate(count);
-
         if p.id != 0 {
             return Ok(page);
         }
@@ -301,9 +298,46 @@ mod tests {
     use crate::config::INITIAL_DB_SIZE;
 
     use super::*;
+    use core::time;
     use std::str;
     use std::thread;
+    use std::thread::sleep;
+    use std::thread::JoinHandle;
+    use std::thread::Thread;
+    use std::time::Duration;
 
+    #[test]
+    fn test_multi_thread() {
+        let db = DB::open("./test1.db", Options { initial_mmap_size: INITIAL_DB_SIZE });
+        let mut v = vec![];
+        let s = std::time::Instant::now(); 
+        for i in 0..3000{
+            let mut tx = db.begin_rwtx();
+            tx.put(i.to_string().as_bytes(), i.to_string().as_bytes());
+            assert_eq!(tx.get(i.to_string().as_bytes()).unwrap(),i.to_string().as_bytes());
+            tx.commit();
+        }
+        println!("{:?}", s.elapsed());
+        for i in 27..=27{
+            let k = i % 100;
+            let mut tx = db.begin_tx();
+            v.push(thread::spawn(move || {
+                //dbg!(k.to_string().as_bytes());
+                assert_eq!(tx.get(k.to_string().as_bytes()),Some(k.to_string().as_bytes()));
+//                assert_eq!(tx.get(k.to_string().as_bytes()),Some(k.to_string().as_bytes()));
+                //assert_eq!(tx.get(k.to_string().as_bytes()),Some(k.to_string().as_bytes()));
+                //assert_eq!(tx.get(k.to_string().as_bytes()),Some(k.to_string().as_bytes()));
+                //assert_eq!(tx.get(k.to_string().as_bytes()),Some(k.to_string().as_bytes()));
+                tx.commit();
+                //println!("finish r {}",i);
+            }));
+        }
+        for i in v {
+            i.join();
+        }
+
+
+    }
     #[test]
     fn test_db_mmap() {
         let db = DB::open("./test1.db", Options { initial_mmap_size: INITIAL_DB_SIZE });

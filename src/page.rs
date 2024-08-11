@@ -1,5 +1,6 @@
 
 
+use std::fmt::Debug;
 use std::{marker::PhantomData, mem::offset_of};
 use crate::config::PAGE_SIZE;
 use crate::error::Result;
@@ -71,10 +72,17 @@ pub struct BranchPageElement {
     pub value: PgId,
 }
 
+
 pub struct LeafPageElement {
     pub pos: u32,
     pub ksize: u32,
     pub vsize: u32,
+}
+
+impl Debug for LeafPageElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafPageElement").field("key", &self.key()).finish()
+    }
 }
 
 
